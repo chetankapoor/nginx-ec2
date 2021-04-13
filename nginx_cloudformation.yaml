@@ -1,0 +1,139 @@
+---
+Description: Create an Amazon Linux server running nginx web server
+
+Parameters:
+    KeyName:
+        Type: AWS::EC2::KeyPair::KeyName
+        Description: Name of an existing EC2 keypair to enable SSH access to the instance
+    SSHCIDR:
+        Type: String
+        Description: The CIDR block restricting SSH
+        MinLength: 0
+        Default: 0.0.0.0/0
+        AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+        ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x
+
+Mappings:
+    Region2AMI:
+        eu-central-1:
+            AMI: ami-0db9040eb3ab74509
+
+Resources:
+    EC2Instance:
+        Type: AWS::EC2::Instance
+        Metadata:
+            AWS::CloudFormation::Init:
+                configSets:
+                    InstallAndConfig:
+                        - Install_update
+                        - Install
+                Install_update:
+                  commands:
+                    01_install_nginx:
+                      command: "amazon-linux-extras install nginx1"
+                Install:
+                    packages:
+                        yum:
+                            nginx        : []
+                            gcc-c++      : []
+                            pcre-devel   : []
+                            zlib-devel   : []
+                            make         : []
+                            gd           : []
+                            gd-devel     : []
+                            openssl      : []
+                            openssl-devel: []
+                    files:
+                        "/usr/share/nginx/html/index.html":
+                          content: |
+                           <html>
+                             <body>
+                               <title>CloudFormed Server</title>
+                               <h1>My Name</h1>
+                               <h2>CloudFormed Server with CloudFormation Helper Scripts</h2>
+                               <p>AWS Region =</p>
+                               <p>Public DNS =</p>
+                             </body>
+                            </html>
+                          mode: '000644'
+                          owner: root
+                          group: root
+
+                        "/etc/cfn/cfn-hup.conf":
+                            content: !Sub |
+                                [main]
+                                stack=${AWS::StackId}
+                                region=${AWS::Region}
+                                interval=1
+                            mode: '000400'
+                            owner: root
+                            group: root
+
+                        "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+                            content: !Sub |
+                                [cfn-auto-reloader-hook]
+                                triggers=post.update
+                                path=Resources.EC2Instance.Metadata.AWS::CloudFormation::Init
+                                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource EC2Instance --region ${AWS::Region} --configsets InstallAndConfig
+                                runas=root
+                            mode: '00400'
+                            owner: root
+                            group: root
+
+                    services:
+                        sysvinit:
+                            nginx:
+                                enabled: 'true'
+                                ensureRunning: 'true'
+                                files:
+                                    - "/usr/share/nginx/html/index.html"
+                                sources:
+                                    - "/etc/nginx/nginx.conf"
+                            cfn-hup:
+                                enabled: true
+                                ensureRunning: true
+                                files:
+                                    - /etc/cfn/cfn-hup.conf
+                                    - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+
+        Properties:
+            ImageId: !FindInMap [Region2AMI, !Ref 'AWS::Region', 'AMI']
+            InstanceType: t2.micro
+            SecurityGroups:
+            - !Ref WebserverSecurityGroup
+            Tags:
+            - Key: Name
+              Value: EC2Instance -2
+            KeyName: !Ref KeyName
+            UserData:
+               'Fn::Base64': !Sub |
+                    #!/bin/bash -ex
+                    yum update -y
+                    yum install -y aws-cfn-bootstrap cloud-init aws-cli
+                    /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource EC2Instance --region ${AWS::Region} --configsets InstallAndConfig
+                    # Signal the status from cfn-init (via $?)
+                    /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource EC2Instance --region ${AWS::Region}
+        CreationPolicy:
+          ResourceSignal:
+            Count: '1'
+            Timeout: PT15M
+
+
+    WebserverSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Allows HTTP
+            SecurityGroupIngress:
+            - CidrIp: 0.0.0.0/0
+              FromPort: 80
+              ToPort: 80
+              IpProtocol: tcp
+            - CidrIp: !Ref SSHCIDR
+              FromPort: 22
+              ToPort: 22
+              IpProtocol: tcp
+
+Outputs:
+    WebURL:
+        Description: URL for web page
+        Value: !Sub 'http://${EC2Instance.PublicIp}'
